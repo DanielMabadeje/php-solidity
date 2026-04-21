@@ -1,0 +1,38 @@
+{
+    "name": "php-solidity/php-solidity",
+    "description": "Write Ethereum smart contracts in PHP — a PHP-to-Solidity transpiler",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["ethereum", "solidity", "smart-contracts", "blockchain", "transpiler", "web3"],
+    "authors": [
+        {
+            "name": "PHPSolidity Contributors",
+            "email": "hello@php-solidity.dev"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "nikic/php-parser": "^5.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0",
+        "phpstan/phpstan": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "PhpSolidity\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhpSolidity\\Tests\\": "tests/"
+        }
+    },
+    "bin": ["bin/phpsolidity"],
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse src --level=8"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
