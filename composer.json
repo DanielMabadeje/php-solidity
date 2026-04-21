@@ -6,8 +6,8 @@
     "keywords": ["ethereum", "solidity", "smart-contracts", "blockchain", "transpiler", "web3"],
     "authors": [
         {
-            "name": "PHPSolidity Contributors",
-            "email": "hello@php-solidity.dev"
+            "name": "Daniel Mabadeje",
+            "email": "mabadejedaniel1@gmail.com"
         }
     ],
     "require": {
