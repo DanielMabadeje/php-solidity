@@ -1,0 +1,184 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * phpsolidity — PHP Smart Contract Transpiler CLI
+ *
+ * Usage:
+ *   phpsolidity compile path/to/MyContract.php
+ *   phpsolidity compile path/to/MyContract.php --output ./contracts
+ *   phpsolidity validate path/to/MyContract.php
+ *   phpsolidity help
+ */
+
+declare(strict_types=1);
+
+// Autoload
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../autoload.php',
+    __DIR__ . '/../../../autoload.php',
+];
+
+$autoloaded = false;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        require $path;
+        $autoloaded = true;
+        break;
+    }
+}
+
+if (! $autoloaded) {
+    fwrite(STDERR, "❌  Autoloader not found. Run 'composer install' first.\n");
+    exit(1);
+}
+
+use PhpSolidity\Transpiler;
+use PhpSolidity\Validator\ContractValidator;
+
+// ─────────────────────────────────────────────────────────────
+// CLI Entry Point
+// ─────────────────────────────────────────────────────────────
+
+$args    = array_slice($argv, 1);
+$command = $args[0] ?? 'help';
+
+match ($command) {
+    'compile'  => cmdCompile($args),
+    'validate' => cmdValidate($args),
+    'help', '--help', '-h' => cmdHelp(),
+    default    => cmdUnknown($command),
+};
+
+// ─────────────────────────────────────────────────────────────
+// Commands
+// ─────────────────────────────────────────────────────────────
+
+function cmdCompile(array $args): void
+{
+    $file = $args[1] ?? null;
+
+    if (! $file) {
+        fwrite(STDERR, "❌  Usage: phpsolidity compile <path/to/Contract.php> [--output <dir>]\n");
+        exit(1);
+    }
+
+    if (! file_exists($file)) {
+        fwrite(STDERR, "❌  File not found: {$file}\n");
+        exit(1);
+    }
+
+    // Parse --output flag
+    $outputDir = '.';
+    $outputIdx = array_search('--output', $args);
+    if ($outputIdx !== false && isset($args[$outputIdx + 1])) {
+        $outputDir = $args[$outputIdx + 1];
+    }
+
+    if (! is_dir($outputDir)) {
+        mkdir($outputDir, 0755, true);
+    }
+
+    echo "\n🔍  Validating {$file}...\n";
+
+    // Validate first
+    $source    = file_get_contents($file);
+    $validator = new ContractValidator();
+    $validator->validate($source, throwOnError: false);
+    $validator->dump();
+
+    if (! $validator->isValid()) {
+        fwrite(STDERR, "Compilation aborted due to validation errors.\n\n");
+        exit(1);
+    }
+
+    echo "⚙️   Transpiling...\n\n";
+
+    try {
+        $transpiler = new Transpiler();
+        $result     = $transpiler->transpileAndSave($file, $outputDir);
+        $result->dump();
+        echo "📄  Written to: {$result->outputPath}\n\n";
+    } catch (\Exception $e) {
+        fwrite(STDERR, "❌  Transpile error: " . $e->getMessage() . "\n");
+        exit(1);
+    }
+}
+
+function cmdValidate(array $args): void
+{
+    $file = $args[1] ?? null;
+
+    if (! $file || ! file_exists($file)) {
+        fwrite(STDERR, "❌  Usage: phpsolidity validate <path/to/Contract.php>\n");
+        exit(1);
+    }
+
+    echo "\n🔍  Validating {$file}...\n\n";
+
+    $source    = file_get_contents($file);
+    $validator = new ContractValidator();
+    $validator->validate($source, throwOnError: false);
+    $validator->dump();
+
+    exit($validator->isValid() ? 0 : 1);
+}
+
+function cmdHelp(): void
+{
+    echo <<<HELP
+
+┌──────────────────────────────────────────────────────────────┐
+│              phpsolidity — PHP Smart Contract CLI            │
+└──────────────────────────────────────────────────────────────┘
+
+USAGE:
+  phpsolidity <command> [arguments] [options]
+
+COMMANDS:
+  compile <file.php>             Transpile a PHP contract to Solidity
+  compile <file.php> --output    Transpile and save to a specific directory
+  validate <file.php>            Validate a PHP contract without compiling
+  help                           Show this help message
+
+EXAMPLES:
+  phpsolidity compile contracts/MyToken.php
+  phpsolidity compile contracts/MyToken.php --output ./solidity
+  phpsolidity validate contracts/MyToken.php
+
+WRITING A CONTRACT:
+  1. Create a PHP class and mark it with #[Contract]
+  2. Use EVM types: uint256, address, bool, bytes32, string, mapping
+  3. Use PHP Attributes for Solidity modifiers: #[External], #[View], etc.
+  4. Use msg::sender(), block::timestamp() for EVM globals
+  5. Run: phpsolidity compile MyContract.php
+
+SUPPORTED TYPES:
+  uint256, uint128, uint64, uint32, uint16, uint8
+  int256, int128, int64, int32, int16, int8
+  address, bool, bytes32, bytes, string, mapping
+
+ATTRIBUTES:
+  #[Contract]             Mark a class as a Solidity contract
+  #[Storage]              Mark a property as a state variable
+  #[Immutable]            Mark a property as immutable
+  #[Constant]             Mark a property as a constant
+  #[Constructor]          Mark a method as the constructor
+  #[External]             External function visibility
+  #[Internal]             Internal function visibility
+  #[View]                 Read-only function
+  #[Pure]                 Pure function (no state access)
+  #[Payable]              Payable function (receives ETH)
+  #[Modifier]             Declare a Solidity modifier
+  #[Guarded('modName')]   Apply a modifier to a function
+  #[SolidityEvent(...)]   Declare an event on the contract
+
+HELP;
+}
+
+function cmdUnknown(string $command): void
+{
+    fwrite(STDERR, "❌  Unknown command: '{$command}'. Run 'phpsolidity help' for usage.\n");
+    exit(1);
+}

@@ -126,8 +126,15 @@ class ContractValidator
 
     private function checkFloatingPoint(string $src): void
     {
-        // Detect float literals like 1.5, 0.001, 3.14
-        if (preg_match('/\b\d+\.\d+\b/', $src, $match)) {
+        // Strip string literals and comments before checking,
+        // so version strings like '^0.8.20' don't false-positive.
+        $stripped = preg_replace('/\/\/[^\n]*/', '', $src);         // // line comments
+        $stripped = preg_replace('/\/\*.*?\*\//s', '', $stripped);  // /* block comments */
+        $stripped = preg_replace("/'[^']*'/", "''", $stripped);     // single-quoted strings
+        $stripped = preg_replace('/"[^"]*"/', '""', $stripped);     // double-quoted strings
+
+        // Now check for bare float literals in actual PHP code
+        if (preg_match('/\b\d+\.\d+\b/', $stripped, $match)) {
             $this->errors[] =
                 "Float literal '{$match[0]}' detected. " .
                 "Solidity has no floating-point. Use integer arithmetic and scale by 1e18 (wei units) instead.";
