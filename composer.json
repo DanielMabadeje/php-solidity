@@ -1,9 +1,18 @@
 {
-    "name": "php-solidity/php-solidity",
+    "name": "danielmabadeje/php-solidity",
     "description": "Write Ethereum smart contracts in PHP — a PHP-to-Solidity transpiler",
     "type": "library",
     "license": "MIT",
-    "keywords": ["ethereum", "solidity", "smart-contracts", "blockchain", "transpiler", "web3"],
+    "keywords": [
+        "ethereum",
+        "solidity",
+        "smart-contracts",
+        "blockchain",
+        "transpiler",
+        "web3",
+        "evm",
+        "defi"
+    ],
     "authors": [
         {
             "name": "Daniel Mabadeje",
@@ -21,7 +30,10 @@
     "autoload": {
         "psr-4": {
             "PhpSolidity\\": "src/"
-        }
+        },
+        "files": [
+            "stubs/evm.php"
+        ]
     },
     "autoload-dev": {
         "psr-4": {
@@ -32,6 +44,9 @@
     "scripts": {
         "test": "phpunit",
         "analyse": "phpstan analyse src --level=8"
+    },
+    "config": {
+        "sort-packages": true
     },
     "minimum-stability": "stable",
     "prefer-stable": true
