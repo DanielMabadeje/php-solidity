@@ -8,6 +8,10 @@
  * The transpiler maps these to their Solidity equivalents.
  *
  * DO NOT use these in regular PHP — only inside #[Contract] classes.
+ *
+ * This file is NOT autoloaded by Composer. Declaring global classes named `Event`, `address`,
+ * `msg` and so on in every request would clash with frameworks (Laravel already has an `Event`
+ * alias). Point your IDE at it instead, or `require` it from a PHPStan/IDE bootstrap file.
  */
 
 declare(strict_types=1);
@@ -70,7 +74,7 @@ class address {
         return $this->value;
     }
 
-    /** Solidity: address.balance */
+    /** Solidity: address.balance (emitted as a property, not a call) */
     public function balance(): uint256
     {
         return new uint256('0');
@@ -87,6 +91,12 @@ class address {
     {
         return new self('0x0000000000000000000000000000000000000000');
     }
+
+    /** Solidity: address(this) — this contract's own address */
+    public static function self(): self
+    {
+        return new self();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -96,6 +106,12 @@ class address {
 /** Solidity: bytes32 */
 class bytes32 {
     public function __construct(public readonly string $value = '0x') {}
+    public function __toString(): string { return $this->value; }
+}
+
+/** Solidity: bytes4 — function selectors */
+class bytes4 {
+    public function __construct(public readonly string $value = '0x00000000') {}
     public function __toString(): string { return $this->value; }
 }
 
@@ -155,6 +171,12 @@ class msg {
     {
         return new bytes();
     }
+
+    /** msg.sig — first four bytes of the calldata */
+    public static function sig(): bytes4
+    {
+        return new bytes4();
+    }
 }
 
 /**
@@ -178,6 +200,30 @@ class block {
     public static function chainid(): uint256
     {
         return new uint256('1');
+    }
+
+    /** block.basefee */
+    public static function basefee(): uint256
+    {
+        return new uint256('0');
+    }
+
+    /** block.gaslimit */
+    public static function gaslimit(): uint256
+    {
+        return new uint256('0');
+    }
+
+    /** block.coinbase */
+    public static function coinbase(): address
+    {
+        return new address();
+    }
+
+    /** block.prevrandao (Solidity >= 0.8.18). Do not use it as a random number source. */
+    public static function prevrandao(): uint256
+    {
+        return new uint256('0');
     }
 }
 
@@ -258,6 +304,45 @@ class EVM
             throw new \RuntimeException('Assertion failed: invariant violation');
         }
     }
+
+    /**
+     * Solidity: revert CustomError(args)
+     * Name must be declared with #[SolidityError('Name', ['type arg', ...])].
+     */
+    public static function revertWith(string $errorName, mixed ...$args): never
+    {
+        throw new \RuntimeException($errorName);
+    }
+
+    /**
+     * Sends ETH with call{value: ...} and reverts if the transfer fails.
+     * Statement only. Prefer this over address.transfer() / send().
+     */
+    public static function sendValue(address $to, uint256 $amount): void {}
+
+    /** Solidity: keccak256(abi.encodePacked(...args)) */
+    public static function keccak256(mixed ...$args): bytes32
+    {
+        return new bytes32();
+    }
+
+    /** Solidity: abi.encodePacked(...args) */
+    public static function encodePacked(mixed ...$args): bytes
+    {
+        return new bytes();
+    }
+
+    /** Solidity: abi.encode(...args) */
+    public static function encode(mixed ...$args): bytes
+    {
+        return new bytes();
+    }
+
+    /**
+     * Inside a #[Modifier] method: the point where the guarded function body runs (Solidity's `_;`).
+     * Without it the body runs after the modifier's statements.
+     */
+    public static function placeholder(): void {}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -278,6 +363,7 @@ class_alias(int64::class,   'int64');
 class_alias(int32::class,   'int32');
 class_alias(address::class, 'address');
 class_alias(bytes32::class, 'bytes32');
+class_alias(bytes4::class,  'bytes4');
 class_alias(bytes::class,   'bytes');
 class_alias(mapping::class, 'mapping');
 class_alias(msg::class,     'msg');

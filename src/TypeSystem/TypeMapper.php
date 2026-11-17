@@ -6,68 +6,37 @@ namespace PhpSolidity\TypeSystem;
 
 use PhpSolidity\Exceptions\UnsupportedTypeException;
 
+/**
+ * Maps PHP type names to Solidity types and answers questions about them.
+ */
 class TypeMapper
 {
-    /**
-     * PHP type name → Solidity type string
-     */
-    private const MAP = [
-        // Integer types
-        'uint256'    => 'uint256',
-        'uint128'    => 'uint128',
-        'uint64'     => 'uint64',
-        'uint32'     => 'uint32',
-        'uint16'     => 'uint16',
-        'uint8'      => 'uint8',
-        'int256'     => 'int256',
-        'int128'     => 'int128',
-        'int64'      => 'int64',
-        'int32'      => 'int32',
-        'int16'      => 'int16',
-        'int8'       => 'int8',
-
-        // Native PHP int (maps to int256 by default)
-        'int'        => 'int256',
-
-        // Address
-        'address'    => 'address',
-
-        // Boolean
-        'bool'       => 'bool',
-
-        // Bytes
-        'bytes32'    => 'bytes32',
-        'bytes16'    => 'bytes16',
-        'bytes8'     => 'bytes8',
-        'bytes4'     => 'bytes4',
-        'bytes'      => 'bytes',
-
-        // String
-        'string'     => 'string',
-
-        // Void / no return
-        'void'       => '',
-        'never'      => '',
-
-        // Mapping (generic — full parsing handled separately)
-        'mapping'    => 'mapping',
-    ];
-
-    /**
-     * Types that are BLOCKED in smart contracts.
-     * Using these throws a compile-time error.
-     */
-    private const BLOCKED = [
-        'float'    => 'Solidity has no floating-point type. Use fixed-point arithmetic with uint256.',
+    /** Types that are blocked in smart contracts, with the reason shown to the developer. */
+    public const BLOCKED = [
+        'float'    => 'Solidity has no floating-point type. Use fixed-point arithmetic with uint256 (multiply by 10 ** 18).',
         'double'   => 'Solidity has no floating-point type.',
-        'array'    => 'Use mapping or a dynamic array type (uint256[]) instead of PHP arrays.',
-        'object'   => 'Objects are not supported. Use mappings or struct patterns.',
-        'mixed'    => 'All types must be explicitly typed in smart contracts.',
+        'array'    => "Use a mapping or a typed array: add #[SolType('uint256[]')] or #[Mapping('address', 'uint256')].",
+        'object'   => 'Objects are not supported. Use a #[Struct] class instead.',
+        'mixed'    => 'All types must be explicit in smart contracts.',
         'null'     => 'Null values are not supported in Solidity.',
         'resource' => 'PHP resources are not supported.',
         'callable' => 'Callables are not supported in smart contracts.',
         'closure'  => 'Closures are not supported in smart contracts.',
-        'iterable' => 'PHP iterables are not supported. Use arrays or mappings explicitly.',
+        'iterable' => 'PHP iterables are not supported. Use a typed array or a mapping.',
+        'self'     => 'Use the contract name instead of self.',
+        'static'   => 'Use the contract name instead of static.',
+    ];
+
+    /** Fixed names that need no pattern matching. */
+    private const SIMPLE = [
+        'address' => 'address',
+        'bool'    => 'bool',
+        'bytes'   => 'bytes',
+        'string'  => 'string',
+        'int'     => 'int256',
+        'void'    => '',
+        'never'   => '',
+        'mapping' => 'mapping',
     ];
 
     /**
@@ -77,7 +46,8 @@ class TypeMapper
      */
     public function toSolidity(string $phpType): string
     {
-        $normalized = strtolower(ltrim($phpType, '\\'));
+        $type       = ltrim($phpType, '\\');
+        $normalized = strtolower($type);
 
         if (isset(self::BLOCKED[$normalized])) {
             throw new UnsupportedTypeException(
@@ -85,71 +55,149 @@ class TypeMapper
             );
         }
 
-        if (isset(self::MAP[$phpType])) {
-            return self::MAP[$phpType];
+        if (isset(self::SIMPLE[$normalized])) {
+            return self::SIMPLE[$normalized];
         }
 
-        if (isset(self::MAP[$normalized])) {
-            return self::MAP[$normalized];
+        if ($this->isElementary($type)) {
+            return $type;
         }
 
-        // Dynamic array types: uint256[], address[], etc.
-        if (str_ends_with($phpType, '[]')) {
-            $baseType = substr($phpType, 0, -2);
-            return $this->toSolidity($baseType) . '[]';
+        // Arrays written as a string by the developer: uint256[], address[3] ...
+        if (preg_match('/^(.+)\[(\d*)\]$/', $type, $m)) {
+            return $this->toSolidity($m[1]) . '[' . $m[2] . ']';
         }
 
-        // Fixed-size array types: uint256[3], address[10], etc.
-        if (preg_match('/^(.+)\[(\d+)\]$/', $phpType, $matches)) {
-            $solidityBase = $this->toSolidity($matches[1]);
-            return "{$solidityBase}[{$matches[2]}]";
-        }
-
-        // Treat unknown types as potential struct names (PascalCase)
-        if (preg_match('/^[A-Z][a-zA-Z0-9]*$/', $phpType)) {
-            return $phpType; // Passed through as a struct/interface name
+        // User-defined types: struct, enum, contract and interface names.
+        if (preg_match('/^[A-Z][A-Za-z0-9_]*$/', $type)) {
+            return $type;
         }
 
         throw new UnsupportedTypeException(
             "Cannot map PHP type '{$phpType}' to a Solidity type. " .
-            "Use EVM types (uint256, address, bool, bytes32, string, mapping) or structs."
+            'Use EVM types (uint256, address, bool, bytes32, string) or a struct, enum or interface name.'
         );
     }
 
-    /**
-     * Returns true if the given PHP type is a known EVM integer type.
-     */
-    public function isInteger(string $phpType): bool
+    /** uint8..uint256, int8..int256 (steps of 8) and bytes1..bytes32. */
+    public function isElementary(string $type): bool
     {
-        return in_array($phpType, [
-            'uint256','uint128','uint64','uint32','uint16','uint8',
-            'int256','int128','int64','int32','int16','int8','int',
-        ], true);
+        if (preg_match('/^u?int(\d+)$/', $type, $m)) {
+            $bits = (int) $m[1];
+            return $bits >= 8 && $bits <= 256 && $bits % 8 === 0;
+        }
+
+        if (preg_match('/^bytes(\d+)$/', $type, $m)) {
+            $size = (int) $m[1];
+            return $size >= 1 && $size <= 32;
+        }
+
+        return false;
+    }
+
+    public function isInteger(string $type): bool
+    {
+        return $type === 'int' || preg_match('/^u?int\d+$/', $type) === 1 && $this->isElementary($type);
+    }
+
+    public function isMapping(string $type): bool
+    {
+        return str_starts_with($type, 'mapping');
+    }
+
+    public function isVoid(string $type): bool
+    {
+        return in_array($type, ['void', 'never', ''], true);
     }
 
     /**
-     * Returns true if the given PHP type is a mapping.
-     */
-    public function isMapping(string $phpType): bool
-    {
-        return str_starts_with($phpType, 'mapping');
-    }
-
-    /**
-     * Returns true if this is a void return type.
-     */
-    public function isVoid(string $phpType): bool
-    {
-        return in_array($phpType, ['void', 'never', ''], true);
-    }
-
-    /**
-     * Returns all supported type names.
+     * Does this Solidity type need a data location (`memory`) when used as a
+     * parameter, return value or local variable?
      *
-     * @return string[]
+     * @param string[] $structNames structs declared in the same source file
      */
+    public function needsDataLocation(string $solidityType, array $structNames = []): bool
+    {
+        if ($solidityType === 'string' || $solidityType === 'bytes') {
+            return true;
+        }
+
+        if (str_ends_with($solidityType, ']')) {
+            return true;
+        }
+
+        return in_array($solidityType, $structNames, true);
+    }
+
+    /** `mapping(address => uint256)` → `uint256`; `null` when the type is not a mapping. */
+    public function mappingValueType(string $type): ?string
+    {
+        $parts = $this->splitMapping($type);
+
+        return $parts['value'] ?? null;
+    }
+
+    /** @return array{key: string, value: string}|null */
+    public function splitMapping(string $type): ?array
+    {
+        $type = trim($type);
+        if (! preg_match('/^mapping\s*\(/', $type)) {
+            return null;
+        }
+
+        $start = strpos($type, '(') + 1;
+        $depth = 1;
+        $arrow = null;
+        $len   = strlen($type);
+
+        for ($i = $start; $i < $len; $i++) {
+            $char = $type[$i];
+            if ($char === '(') {
+                $depth++;
+            } elseif ($char === ')') {
+                $depth--;
+                if ($depth === 0) {
+                    break;
+                }
+            } elseif ($depth === 1 && $arrow === null && substr($type, $i, 2) === '=>') {
+                $arrow = $i;
+            }
+        }
+
+        if ($arrow === null || $depth !== 0) {
+            return null;
+        }
+
+        return [
+            'key'   => trim(substr($type, $start, $arrow - $start)),
+            'value' => trim(substr($type, $arrow + 2, $i - $arrow - 2)),
+        ];
+    }
+
+    /** Element type of `T[]` or `T[n]`; `null` for anything else. */
+    public function arrayElementType(string $type): ?string
+    {
+        if (preg_match('/^(.+)\[\d*\]$/', $type, $m)) {
+            return $m[1];
+        }
+
+        return null;
+    }
+
+    /** @return string[] */
     public function supportedTypes(): array
     {
-        return array_keys(self::MAP);
+        $types = array_keys(self::SIMPLE);
+
+        for ($bits = 8; $bits <= 256; $bits += 8) {
+            $types[] = "uint{$bits}";
+            $types[] = "int{$bits}";
+        }
+
+        for ($size = 1; $size <= 32; $size++) {
+            $types[] = "bytes{$size}";
+        }
+
+        return $types;
     }
 }

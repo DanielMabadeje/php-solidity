@@ -5,7 +5,8 @@ declare(strict_types=1);
 use PhpSolidity\Attributes\Contract;
 use PhpSolidity\Attributes\SolidityEvent;
 use PhpSolidity\Attributes\Storage;
-use PhpSolidity\Attributes\Immutable;
+use PhpSolidity\Attributes\Mapping;
+use PhpSolidity\Attributes\Constant;
 use PhpSolidity\Attributes\Constructor;
 use PhpSolidity\Attributes\External;
 use PhpSolidity\Attributes\View;
@@ -40,34 +41,31 @@ class MyToken
     #[Storage(public: true)]
     private string $symbol;
 
-    #[Storage(public: true)]
-    private uint8 $decimals;
+    #[Constant, Storage(public: true)]
+    private uint8 $decimals = 18;
 
     #[Storage(public: true)]
     private uint256 $totalSupply;
 
-    /** @sol-type mapping(address => uint256) */
-    #[Storage]
+    #[Mapping('address', 'uint256')]
     private mapping $balances;
 
-    /** @sol-type mapping(address => mapping(address => uint256)) */
-    #[Storage]
+    #[Mapping('address', 'mapping(address => uint256)')]
     private mapping $allowances;
 
-    #[Immutable]
+    // Not #[Immutable]: transferOwnership() changes it after deployment.
     private address $owner;
 
     // ─── Constructor ──────────────────────────────────────────
 
     #[Constructor]
     public function __construct(
-        string $name,
-        string $symbol,
+        string $tokenName,
+        string $tokenSymbol,
         uint256 $initialSupply,
     ) {
-        $this->name        = $name;
-        $this->symbol      = $symbol;
-        $this->decimals    = new uint8(18);
+        $this->name        = $tokenName;
+        $this->symbol      = $tokenSymbol;
         $this->totalSupply = $initialSupply;
         $this->owner       = msg::sender();
 
@@ -93,9 +91,9 @@ class MyToken
     }
 
     #[External, View]
-    public function allowance(address $owner, address $spender): uint256
+    public function allowance(address $holder, address $spender): uint256
     {
-        return $this->allowances[$owner][$spender];
+        return $this->allowances[$holder][$spender];
     }
 
     // ─── Write Functions ──────────────────────────────────────

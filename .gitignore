@@ -1,0 +1,21 @@
+# Dependencies
+/vendor/
+/composer.lock
+/scripts/node_modules/
+/scripts/package-lock.json
+
+# Build output
+/build/
+*.sol.tmp
+
+# Tooling caches
+/.phpunit.cache/
+/.phpunit.result.cache
+/.phpstan.cache/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,22 @@
+name: Feature request
+description: Support another Solidity feature or PHP construct
+labels: [enhancement]
+body:
+  - type: textarea
+    id: solidity
+    attributes:
+      label: The Solidity you want to produce
+      render: solidity
+    validations:
+      required: true
+  - type: textarea
+    id: php
+    attributes:
+      label: How you would like to write it in PHP
+      render: php
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why does it matter?

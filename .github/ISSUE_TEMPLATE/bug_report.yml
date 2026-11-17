@@ -1,0 +1,33 @@
+name: Bug report
+description: The transpiler crashed, rejected valid code, or produced wrong or invalid Solidity
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the generated Solidity is **wrong in a way that could lose funds**, please follow [SECURITY.md](https://github.com/DanielMabadeje/php-solidity/blob/main/SECURITY.md) instead of opening a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `phpsolidity version`, and your PHP version
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Smallest PHP contract that shows the problem
+      render: php
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected (Solidity you would write by hand)
+      render: solidity
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened (generated Solidity, or the full error message)
+    validations:
+      required: true
