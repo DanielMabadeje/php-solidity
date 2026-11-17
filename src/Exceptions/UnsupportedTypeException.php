@@ -1,5 +1,8 @@
 <?php
+
 declare(strict_types=1);
+
 namespace PhpSolidity\Exceptions;
 
-class UnsupportedTypeException extends PhpSolidityException {}
+/** Thrown when a PHP type has no Solidity equivalent. */
+class UnsupportedTypeException extends CompileException {}

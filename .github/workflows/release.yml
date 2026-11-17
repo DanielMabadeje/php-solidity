@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          coverage: none
+
+      - name: The tag must match the CLI version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cli=$(grep -oP "VERSION = '\K[^']+" src/Cli/Application.php)
+          if [ "$tag" != "$cli" ]; then
+            echo "Tag v$tag does not match Application::VERSION ($cli). Bump it before tagging."
+            exit 1
+          fi
+
+      - run: composer update --prefer-stable --no-interaction --no-progress
+      - run: vendor/bin/phpunit
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          awk -v v="$tag" '
+            $0 ~ "^## \\[" v "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || { echo "No CHANGELOG entry for $tag"; exit 1; }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md

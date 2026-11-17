@@ -5,170 +5,291 @@ declare(strict_types=1);
 namespace PhpSolidity\Parser;
 
 use PhpParser\Node;
+use PhpParser\Node\Stmt;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
+use PhpParser\Node\Stmt\Enum_;
+use PhpParser\Node\Stmt\Interface_;
 use PhpParser\Node\Stmt\Property;
-use PhpParser\NodeTraverser;
-use PhpParser\NodeVisitorAbstract;
 use PhpParser\ParserFactory;
-use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
-
 use PhpSolidity\AST\Nodes\ContractNode;
+use PhpSolidity\AST\Nodes\EnumNode;
+use PhpSolidity\AST\Nodes\ErrorNode;
 use PhpSolidity\AST\Nodes\EventNode;
 use PhpSolidity\AST\Nodes\EventParamNode;
 use PhpSolidity\AST\Nodes\FunctionNode;
 use PhpSolidity\AST\Nodes\ModifierNode;
 use PhpSolidity\AST\Nodes\ParameterNode;
+use PhpSolidity\AST\Nodes\SourceUnitNode;
 use PhpSolidity\AST\Nodes\StateVariableNode;
+use PhpSolidity\AST\Nodes\StructNode;
+use PhpSolidity\Exceptions\CompileException;
 use PhpSolidity\Exceptions\ParseException;
 use PhpSolidity\TypeSystem\TypeMapper;
 
+/**
+ * Stage 1 of the pipeline: PHP source → Contract IR.
+ *
+ * nikic/php-parser turns the PHP text into a PHP syntax tree. This class walks that tree and
+ * builds our own, much smaller tree (SourceUnitNode → ContractNode → FunctionNode ...) that
+ * describes a *contract* rather than a PHP file. Function bodies are kept as php-parser
+ * statements and translated later by BodyEmitter, so no information is lost on the way.
+ */
 class ContractParser
 {
-    private TypeMapper $typeMapper;
-    private PrettyPrinter $printer;
+    public function __construct(
+        private readonly TypeMapper $types = new TypeMapper(),
+    ) {}
 
-    public function __construct()
-    {
-        $this->typeMapper = new TypeMapper();
-        $this->printer    = new PrettyPrinter();
-    }
-
-    /**
-     * Parse a PHP source file and return a ContractNode.
-     *
-     * @throws ParseException
-     */
+    /** @throws ParseException */
     public function parseFile(string $filePath): ContractNode
     {
-        if (! file_exists($filePath)) {
+        return $this->primaryOf($this->parseSourceUnitFile($filePath));
+    }
+
+    /** @throws ParseException */
+    public function parseSourceUnitFile(string $filePath): SourceUnitNode
+    {
+        if (! is_file($filePath)) {
             throw new ParseException("File not found: {$filePath}");
         }
 
-        return $this->parseSource(file_get_contents($filePath));
+        return $this->parseSourceUnit((string) file_get_contents($filePath));
     }
 
     /**
-     * Parse PHP source code string and return a ContractNode.
+     * Parse PHP source and return the primary contract (kept for backwards compatibility).
      *
      * @throws ParseException
      */
     public function parseSource(string $source): ContractNode
+    {
+        return $this->primaryOf($this->parseSourceUnit($source));
+    }
+
+    /**
+     * Parse PHP source into everything that belongs in one `.sol` file.
+     *
+     * @throws ParseException
+     * @throws CompileException
+     */
+    public function parseSourceUnit(string $source): SourceUnitNode
+    {
+        $stmts = $this->parsePhp($source);
+
+        /** @var array<Class_|Interface_|Enum_> $declared */
+        $declared = [];
+        $this->collectDeclarations($stmts, $declared);
+
+        $declarations = [];
+        $imports      = [];
+
+        foreach ($declared as $node) {
+            foreach (AttributeReader::all($node, 'Import') as $import) {
+                $path = AttributeReader::arguments($import)['path'] ?? null;
+                if (is_string($path) && ! in_array($path, $imports, true)) {
+                    $imports[] = $path;
+                }
+            }
+
+            if ($node instanceof Enum_) {
+                $declarations[] = $this->buildEnum($node);
+            } elseif ($node instanceof Interface_) {
+                $declarations[] = $this->buildInterface($node);
+            } elseif (AttributeReader::has($node, 'Struct')) {
+                $declarations[] = $this->buildStruct($node);
+            } elseif (AttributeReader::has($node, 'Library')) {
+                $declarations[] = $this->buildContract($node, 'library');
+            } elseif (AttributeReader::has($node, 'Contract')) {
+                $declarations[] = $this->buildContract($node, $node->isAbstract() ? 'abstract contract' : 'contract');
+            }
+        }
+
+        $unit = new SourceUnitNode('MIT', '^0.8.20', $imports, $declarations);
+
+        if ($unit->primary() === null) {
+            throw new ParseException(
+                'No #[Contract] class found. Mark your class with the #[Contract] attribute.'
+            );
+        }
+
+        $primary = $unit->primary();
+
+        return new SourceUnitNode($primary->license, $primary->solidityVersion, $imports, $declarations);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // php-parser entry points
+    // ─────────────────────────────────────────────────────────
+
+    /** @return Stmt[] */
+    private function parsePhp(string $source): array
     {
         $parser = (new ParserFactory())->createForNewestSupportedVersion();
 
         try {
             $stmts = $parser->parse($source);
         } catch (\PhpParser\Error $e) {
-            throw new ParseException("PHP parse error: " . $e->getMessage());
-        }
-
-        // Find the first class with a #[Contract] attribute
-        $contractClass = $this->findContractClass($stmts);
-
-        if ($contractClass === null) {
             throw new ParseException(
-                "No #[Contract] class found. Mark your class with the #[Contract] attribute."
+                'PHP parse error: ' . $e->getRawMessage(),
+                $e->getStartLine() > 0 ? $e->getStartLine() : null,
+                $e,
             );
         }
 
-        return $this->buildContractNode($contractClass);
+        return $stmts ?? [];
+    }
+
+    /**
+     * @param Node[]                            $stmts
+     * @param array<Class_|Interface_|Enum_>    $out
+     */
+    private function collectDeclarations(array $stmts, array &$out): void
+    {
+        foreach ($stmts as $stmt) {
+            if ($stmt instanceof Stmt\Namespace_) {
+                $this->collectDeclarations($stmt->stmts, $out);
+            } elseif ($stmt instanceof Class_ || $stmt instanceof Interface_ || $stmt instanceof Enum_) {
+                $out[] = $stmt;
+            }
+        }
+    }
+
+    private function primaryOf(SourceUnitNode $unit): ContractNode
+    {
+        $primary = $unit->primary();
+        if ($primary === null) {
+            throw new ParseException('No #[Contract] class found. Mark your class with the #[Contract] attribute.');
+        }
+
+        return $primary;
     }
 
     // ─────────────────────────────────────────────────────────
-    // Find the #[Contract] class
+    // Enums and structs
     // ─────────────────────────────────────────────────────────
 
-    /** @param Node[] $stmts */
-    private function findContractClass(array $stmts): ?Class_
+    private function buildEnum(Enum_ $enum): EnumNode
     {
-        foreach ($stmts as $stmt) {
-            if ($stmt instanceof Class_) {
-                foreach ($stmt->attrGroups as $attrGroup) {
-                    foreach ($attrGroup->attrs as $attr) {
-                        $attrName = $attr->name->toString();
-                        if (in_array($attrName, ['Contract', 'PhpSolidity\\Attributes\\Contract'], true)) {
-                            return $stmt;
-                        }
-                    }
+        $cases = [];
+        foreach ($enum->stmts as $stmt) {
+            if ($stmt instanceof Stmt\EnumCase) {
+                $cases[] = $stmt->name->toString();
+            }
+        }
+
+        return new EnumNode($enum->name?->toString() ?? '', $cases, $enum->getStartLine());
+    }
+
+    private function buildStruct(Class_ $class): StructNode
+    {
+        $members = [];
+
+        foreach ($class->stmts as $stmt) {
+            if ($stmt instanceof Property && ! $stmt->isStatic()) {
+                foreach ($stmt->props as $prop) {
+                    $members[] = new ParameterNode(
+                        $prop->name->toString(),
+                        $this->resolveType($stmt, $stmt->type, $stmt->getDocComment()?->getText(), 'struct member $' . $prop->name->toString(), $stmt->getStartLine()),
+                    );
                 }
             }
 
-            // Recurse into namespaces
-            if ($stmt instanceof Node\Stmt\Namespace_) {
-                $found = $this->findContractClass($stmt->stmts);
-                if ($found !== null) {
-                    return $found;
+            if ($stmt instanceof ClassMethod && $stmt->name->toString() === '__construct') {
+                foreach ($stmt->params as $param) {
+                    if ($param->flags !== 0 && $param->var instanceof Node\Expr\Variable && is_string($param->var->name)) {
+                        $members[] = new ParameterNode(
+                            $param->var->name,
+                            $this->resolveType($param, $param->type, null, 'struct member $' . $param->var->name, $param->getStartLine()),
+                        );
+                    }
                 }
             }
         }
 
-        return null;
+        return new StructNode($class->name?->toString() ?? '', $members, $class->getStartLine());
     }
 
     // ─────────────────────────────────────────────────────────
-    // Build the ContractNode
+    // Contracts, libraries and interfaces
     // ─────────────────────────────────────────────────────────
 
-    private function buildContractNode(Class_ $class): ContractNode
+    private function buildContract(Class_ $class, string $kind): ContractNode
     {
-        // Extract #[Contract] attribute options
-        $contractAttr    = $this->getContractAttribute($class);
-        $contractName    = $contractAttr['name']    ?? $class->name->toString();
-        $license         = $contractAttr['license'] ?? 'MIT';
-        $solidityVersion = $contractAttr['version'] ?? '^0.8.20';
-
-        // Extract #[Inherits] parents
-        $inherits = $this->extractInherits($class);
-
-        // Extract #[SolidityEvent] definitions
-        $events = $this->extractEvents($class);
+        $attribute = AttributeReader::find($class, $kind === 'library' ? 'Library' : 'Contract');
+        $options   = $attribute !== null ? AttributeReader::arguments($attribute) : [];
 
         $stateVariables = [];
         $functions      = [];
         $modifiers      = [];
 
         foreach ($class->stmts as $stmt) {
-            if ($stmt instanceof Property) {
-                $vars = $this->parseProperty($stmt);
-                foreach ($vars as $var) {
-                    $stateVariables[] = $var;
+            if ($stmt instanceof Property && ! $stmt->isStatic()) {
+                foreach ($this->buildStateVariables($stmt) as $variable) {
+                    $stateVariables[] = $variable;
                 }
             }
 
             if ($stmt instanceof ClassMethod) {
-                if ($this->hasAttribute($stmt, 'Modifier')) {
-                    $modifiers[] = $this->parseModifier($stmt);
+                if (AttributeReader::has($stmt, 'Modifier')) {
+                    $modifiers[] = $this->buildModifier($stmt);
                 } else {
-                    $functions[] = $this->parseMethod($stmt);
+                    $functions[] = $this->buildFunction($stmt, $kind);
                 }
             }
         }
 
+        $name = is_string($options['name'] ?? null) ? $options['name'] : ($class->name?->toString() ?? '');
+
         return new ContractNode(
-            name:            $contractName,
-            license:         $license,
-            solidityVersion: $solidityVersion,
+            name:            $name,
+            license:         is_string($options['license'] ?? null) ? $options['license'] : 'MIT',
+            solidityVersion: is_string($options['version'] ?? null) ? $options['version'] : '^0.8.20',
             stateVariables:  $stateVariables,
-            events:          $events,
+            events:          $this->extractEvents($class),
             modifiers:       $modifiers,
             functions:       $functions,
+            inherits:        $this->extractInherits($class),
+            errors:          $this->extractErrors($class),
+            kind:            $kind,
+            line:            $class->getStartLine(),
+        );
+    }
+
+    private function buildInterface(Interface_ $interface): ContractNode
+    {
+        $functions = [];
+        foreach ($interface->stmts as $stmt) {
+            if ($stmt instanceof ClassMethod) {
+                $functions[] = $this->buildFunction($stmt, 'interface');
+            }
+        }
+
+        $inherits = array_map(static fn (Node\Name $n) => $n->getLast(), $interface->extends);
+
+        return new ContractNode(
+            name:            $interface->name?->toString() ?? '',
+            license:         'MIT',
+            solidityVersion: '^0.8.20',
+            functions:       $functions,
             inherits:        $inherits,
+            events:          $this->extractEvents($interface),
+            errors:          $this->extractErrors($interface),
+            kind:            'interface',
+            line:            $interface->getStartLine(),
         );
     }
 
     // ─────────────────────────────────────────────────────────
-    // Parse a property/state variable
+    // State variables
     // ─────────────────────────────────────────────────────────
 
     /** @return StateVariableNode[] */
-    private function parseProperty(Property $property): array
+    private function buildStateVariables(Property $property): array
     {
-        $nodes       = [];
-        $isConstant  = $this->hasAttribute($property, 'Constant');
-        $isImmutable = $this->hasAttribute($property, 'Immutable');
-        $isPublic    = $this->hasAttribute($property, 'Storage')
-            && $this->getAttributeArg($property, 'Storage', 'public') === true;
+        $isConstant  = AttributeReader::has($property, 'Constant');
+        $isImmutable = AttributeReader::has($property, 'Immutable');
+        $explicitPub = AttributeReader::argument($property, 'Storage', 'public') === true;
 
         $mutability = match (true) {
             $isConstant  => 'constant',
@@ -177,29 +298,31 @@ class ContractParser
         };
 
         $visibility = match (true) {
-            $isPublic                        => 'public',
-            $property->isProtected()         => 'internal',
-            $property->isPrivate()           => 'private',
-            default                          => 'private',
+            $explicitPub || $property->isPublic() => 'public',
+            $property->isProtected()              => 'internal',
+            default                               => 'private',
         };
 
-        // Extract the PHP type
-        $phpType = $this->extractPropertyType($property);
-        $solidityType = $this->typeMapper->toSolidity($phpType);
+        $nodes = [];
 
         foreach ($property->props as $prop) {
-            $defaultValue = null;
-            if ($prop->default !== null) {
-                $defaultValue = $this->printer->prettyPrintExpr($prop->default);
-                $defaultValue = $this->translateExpression($defaultValue);
-            }
+            $phpName = $prop->name->toString();
+
+            $solidityType = $this->resolveType(
+                $property,
+                $property->type,
+                $property->getDocComment()?->getText(),
+                "property \${$phpName}",
+                $property->getStartLine(),
+            );
 
             $nodes[] = new StateVariableNode(
-                name:         ltrim($prop->name->toString(), '$'),
+                name:         $phpName,
                 solidityType: $solidityType,
                 visibility:   $visibility,
                 mutability:   $mutability,
-                defaultValue: $defaultValue,
+                defaultValue: $prop->default,
+                line:         $property->getStartLine(),
             );
         }
 
@@ -207,272 +330,149 @@ class ContractParser
     }
 
     // ─────────────────────────────────────────────────────────
-    // Parse a method/function
+    // Functions and modifiers
     // ─────────────────────────────────────────────────────────
 
-    private function parseMethod(ClassMethod $method): FunctionNode
+    private function buildFunction(ClassMethod $method, string $contractKind): FunctionNode
     {
-        $isConstructor = $method->name->toString() === '__construct'
-            || $this->hasAttribute($method, 'Constructor');
+        $phpName = $method->name->toString();
 
-        // Visibility
-        $visibility = 'public';
-        if ($this->hasAttribute($method, 'External'))        $visibility = 'external';
-        elseif ($this->hasAttribute($method, 'Internal'))    $visibility = 'internal';
-        elseif ($this->hasAttribute($method, 'SolidityPrivate')) $visibility = 'private';
-        elseif ($isConstructor)                              $visibility = '';
+        $kind = match (true) {
+            $phpName === '__construct' || AttributeReader::has($method, 'Constructor') => 'constructor',
+            AttributeReader::has($method, 'Receive')                                  => 'receive',
+            AttributeReader::has($method, 'Fallback')                                 => 'fallback',
+            default                                                                   => 'function',
+        };
 
-        // Mutability
-        $mutability = '';
-        if ($this->hasAttribute($method, 'View'))            $mutability = 'view';
-        elseif ($this->hasAttribute($method, 'Pure'))        $mutability = 'pure';
-        elseif ($this->hasAttribute($method, 'Payable'))     $mutability = 'payable';
+        $isPayable = AttributeReader::has($method, 'Payable');
 
-        // Return type
+        $visibility = $this->functionVisibility($method, $kind, $contractKind);
+
+        $mutability = match (true) {
+            AttributeReader::has($method, 'View')   => 'view',
+            AttributeReader::has($method, 'Pure')   => 'pure',
+            $isPayable || $kind === 'receive'       => 'payable',
+            default                                 => '',
+        };
+
         $returnType = '';
-        if ($method->returnType !== null && ! $isConstructor) {
-            $phpReturnType = $this->nodeToTypeString($method->returnType);
-            if (! $this->typeMapper->isVoid($phpReturnType)) {
-                $returnType = $this->typeMapper->toSolidity($phpReturnType);
+        $override   = AttributeReader::argument($method, 'SolType', 'type');
+        if (is_string($override)) {
+            $returnType = $override;
+        } elseif ($method->returnType !== null && $kind === 'function') {
+            $phpReturn = $this->typeName($method->returnType, "return type of {$phpName}()", $method->getStartLine());
+            if (! $this->types->isVoid($phpReturn)) {
+                $returnType = $this->types->toSolidity($phpReturn);
             }
         }
 
-        // Parameters
-        $params = $this->parseParameters($method->params);
-
-        // Applied modifiers
-        $appliedModifiers = [];
-        if ($this->hasAttribute($method, 'Guarded')) {
-            $guardedMods = $this->getAttributeArgs($method, 'Guarded');
-            $appliedModifiers = array_values($guardedMods);
+        $guards = [];
+        $guard  = AttributeReader::find($method, 'Guarded');
+        if ($guard !== null) {
+            $guards = array_values(array_filter(
+                AttributeReader::values($guard),
+                static fn ($v) => is_string($v) && $v !== '',
+            ));
         }
 
-        // Body
-        $body = $this->parseBody($method->stmts ?? []);
-
-        $name = $isConstructor ? 'constructor' : $method->name->toString();
+        $name = match ($kind) {
+            'constructor' => 'constructor',
+            'receive'     => 'receive',
+            'fallback'    => 'fallback',
+            default       => $phpName,
+        };
 
         return new FunctionNode(
             name:          $name,
             visibility:    $visibility,
             mutability:    $mutability,
             returnType:    $returnType,
-            isConstructor: $isConstructor,
-            params:        $params,
-            modifiers:     $appliedModifiers,
-            body:          $body,
+            isConstructor: $kind === 'constructor',
+            params:        $this->buildParameters($method->params),
+            modifiers:     $guards,
+            body:          $method->stmts,
+            kind:          $kind,
+            isVirtual:     AttributeReader::has($method, 'Virtual'),
+            isOverride:    AttributeReader::has($method, 'Override'),
+            line:          $method->getStartLine(),
         );
     }
 
-    // ─────────────────────────────────────────────────────────
-    // Parse a modifier method
-    // ─────────────────────────────────────────────────────────
-
-    private function parseModifier(ClassMethod $method): ModifierNode
+    private function functionVisibility(ClassMethod $method, string $kind, string $contractKind): string
     {
-        $params = $this->parseParameters($method->params);
-        $body   = $this->parseBody($method->stmts ?? []);
+        if ($kind === 'constructor') {
+            return '';
+        }
 
+        if ($kind === 'receive' || $kind === 'fallback' || $contractKind === 'interface') {
+            return 'external';
+        }
+
+        return match (true) {
+            AttributeReader::has($method, 'External')        => 'external',
+            AttributeReader::has($method, 'Internal')        => 'internal',
+            AttributeReader::has($method, 'SolidityPrivate') => 'private',
+            AttributeReader::has($method, 'SolidityPublic')  => 'public',
+            $contractKind === 'library'                      => 'internal',
+            $method->isPrivate()                             => 'private',
+            $method->isProtected()                           => 'internal',
+            default                                          => 'public',
+        };
+    }
+
+    private function buildModifier(ClassMethod $method): ModifierNode
+    {
         return new ModifierNode(
             name:   $method->name->toString(),
-            params: $params,
-            body:   $body,
+            params: $this->buildParameters($method->params),
+            body:   $method->stmts ?? [],
+            line:   $method->getStartLine(),
         );
     }
-
-    // ─────────────────────────────────────────────────────────
-    // Parse parameters
-    // ─────────────────────────────────────────────────────────
 
     /**
      * @param Node\Param[] $params
      * @return ParameterNode[]
      */
-    private function parseParameters(array $params): array
+    private function buildParameters(array $params): array
     {
         $nodes = [];
 
         foreach ($params as $param) {
-            $phpType      = $param->type ? $this->nodeToTypeString($param->type) : 'uint256';
-            $solidityType = $this->typeMapper->toSolidity($phpType);
-            $name         = ltrim($param->var->name, '$');
-            $default      = $param->default
-                ? $this->translateExpression($this->printer->prettyPrintExpr($param->default))
-                : null;
+            $name = $param->var instanceof Node\Expr\Variable && is_string($param->var->name) ? $param->var->name : '';
 
-            $nodes[] = new ParameterNode($name, $solidityType, $default);
+            $nodes[] = new ParameterNode(
+                $name,
+                $this->resolveType($param, $param->type, null, "parameter \${$name}", $param->getStartLine()),
+                $param->default,
+            );
         }
 
         return $nodes;
     }
 
     // ─────────────────────────────────────────────────────────
-    // Parse method body
+    // Class-level attributes
     // ─────────────────────────────────────────────────────────
 
-    /** @param Node\Stmt[] $stmts */
-    private function parseBody(array $stmts): string
-    {
-        if (empty($stmts)) {
-            return '';
-        }
-
-        $lines = [];
-        foreach ($stmts as $stmt) {
-            $phpLine = $this->printer->prettyPrint([$stmt]);
-            $lines[] = $this->translateStatement($phpLine);
-        }
-
-        return implode("\n", $lines);
-    }
-
-    // ─────────────────────────────────────────────────────────
-    // PHP → Solidity translation helpers
-    // ─────────────────────────────────────────────────────────
-
-    /**
-     * Translate a PHP statement string to Solidity.
-     * This handles the common patterns.
-     */
-    private function translateStatement(string $php): string
-    {
-        $sol = $php;
-
-        // $this->property → property (storage vars)
-        $sol = preg_replace('/EVM::require\(/', 'require(', $sol);
-        $sol = preg_replace('/EVM::revert\(/',  'revert(',  $sol);
-        $sol = preg_replace('/EVM::assert\(/',  'assert(',  $sol);
-        $sol = preg_replace('/\$this->(\w+)/', '$1', $sol);
-
-        // msg::sender() → msg.sender
-        $sol = str_replace('msg::sender()', 'msg.sender', $sol);
-        $sol = str_replace('msg::value()', 'msg.value', $sol);
-        $sol = str_replace('msg::data()', 'msg.data', $sol);
-
-        // block::timestamp() → block.timestamp
-        $sol = str_replace('block::timestamp()', 'block.timestamp', $sol);
-        $sol = str_replace('block::number()', 'block.number', $sol);
-        $sol = str_replace('block::chainid()', 'block.chainid', $sol);
-
-        // tx::origin() → tx.origin
-        $sol = str_replace('tx::origin()', 'tx.origin', $sol);
-
-        // Event::emit('Transfer', ...) → emit Transfer(...)
-        $sol = preg_replace(
-            "/Event::emit\('(\w+)',\s*(.*)\)/",
-            'emit $1($2)',
-            $sol
-        );
-
-        // address::zero() → address(0)
-        $sol = str_replace('address::zero()', 'address(0)', $sol);
-
-        // require() — already matches Solidity syntax
-        // Remove variable sigil from local vars
-        $sol = preg_replace('/\$(\w+)/', '$1', $sol);
-
-        // Remove semicolons that printer adds (we add them in emitter)
-        // Actually keep them — the body will be indented as-is
-
-        return $sol;
-    }
-
-    private function translateExpression(string $php): string
-    {
-        return $this->translateStatement($php);
-    }
-
-    // ─────────────────────────────────────────────────────────
-    // Attribute helpers
-    // ─────────────────────────────────────────────────────────
-
-    private function hasAttribute(Node $node, string $attrName): bool
-    {
-        foreach ($node->attrGroups as $attrGroup) {
-            foreach ($attrGroup->attrs as $attr) {
-                $name = $attr->name->getLast();
-                if ($name === $attrName) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private function getAttributeArg(Node $node, string $attrName, string $argName): mixed
-    {
-        foreach ($node->attrGroups as $attrGroup) {
-            foreach ($attrGroup->attrs as $attr) {
-                if ($attr->name->getLast() === $attrName) {
-                    foreach ($attr->args as $arg) {
-                        if ($arg->name?->toString() === $argName) {
-                            return $this->resolveScalar($arg->value);
-                        }
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    private function getAttributeArgs(Node $node, string $attrName): array
-    {
-        foreach ($node->attrGroups as $attrGroup) {
-            foreach ($attrGroup->attrs as $attr) {
-                if ($attr->name->getLast() === $attrName) {
-                    return array_map(
-                        fn($arg) => $this->resolveScalar($arg->value),
-                        $attr->args
-                    );
-                }
-            }
-        }
-        return [];
-    }
-
-    private function getContractAttribute(Class_ $class): array
-    {
-        foreach ($class->attrGroups as $attrGroup) {
-            foreach ($attrGroup->attrs as $attr) {
-                if ($attr->name->getLast() === 'Contract') {
-                    $result = [];
-                    foreach ($attr->args as $arg) {
-                        if ($arg->name) {
-                            $result[$arg->name->toString()] = $this->resolveScalar($arg->value);
-                        }
-                    }
-                    return $result;
-                }
-            }
-        }
-        return [];
-    }
-
-    private function resolveScalar(Node\Expr $expr): mixed
-    {
-        if ($expr instanceof Node\Scalar\String_)  return $expr->value;
-        if ($expr instanceof Node\Scalar\Int_)     return $expr->value;
-        if ($expr instanceof Node\Scalar\Float_)   return $expr->value;
-        if ($expr instanceof Node\Expr\ConstFetch) return $expr->name->toString() === 'true';
-        return null;
-    }
-
-    private function extractInherits(Class_ $class): array
+    /** @return string[] */
+    private function extractInherits(Class_|Interface_ $class): array
     {
         $parents = [];
-        if ($class->extends) {
-            $parents[] = $class->extends->getLast();
+
+        if ($class instanceof Class_) {
+            if ($class->extends !== null) {
+                $parents[] = $class->extends->getLast();
+            }
+            foreach ($class->implements as $interface) {
+                $parents[] = $interface->getLast();
+            }
         }
 
-        foreach ($class->attrGroups as $attrGroup) {
-            foreach ($attrGroup->attrs as $attr) {
-                if ($attr->name->getLast() === 'Inherits') {
-                    foreach ($attr->args as $arg) {
-                        // ::class reference → last part of class name
-                        if ($arg->value instanceof Node\Expr\ClassConstFetch) {
-                            $parents[] = $arg->value->class->getLast();
-                        }
-                    }
+        foreach (AttributeReader::all($class, 'Inherits') as $attribute) {
+            foreach (AttributeReader::values($attribute) as $value) {
+                if (is_string($value) && $value !== '' && ! in_array($value, $parents, true)) {
+                    $parents[] = $value;
                 }
             }
         }
@@ -481,62 +481,124 @@ class ContractParser
     }
 
     /** @return EventNode[] */
-    private function extractEvents(Class_ $class): array
+    private function extractEvents(Class_|Interface_ $class): array
     {
         $events = [];
 
-        foreach ($class->attrGroups as $attrGroup) {
-            foreach ($attrGroup->attrs as $attr) {
-                if ($attr->name->getLast() === 'SolidityEvent') {
-                    $args = $attr->args;
+        foreach (AttributeReader::all($class, 'SolidityEvent') as $attribute) {
+            $args   = AttributeReader::arguments($attribute);
+            $name   = is_string($args['name'] ?? null) ? $args['name'] : 'UnnamedEvent';
+            $params = is_array($args['params'] ?? null) ? $args['params'] : [];
 
-                    $eventName = $args[0]->value instanceof Node\Scalar\String_
-                        ? $args[0]->value->value
-                        : 'UnnamedEvent';
-
-                    $params = [];
-                    if (isset($args[1]) && $args[1]->value instanceof Node\Expr\Array_) {
-                        foreach ($args[1]->value->items as $item) {
-                            if ($item->value instanceof Node\Scalar\String_) {
-                                $parts   = explode(' ', trim($item->value->value));
-                                $name    = array_pop($parts);
-                                $indexed = in_array('indexed', $parts, true);
-                                $type    = implode(' ', array_filter($parts, fn($p) => $p !== 'indexed'));
-
-                                $params[] = new EventParamNode($type, $name, $indexed);
-                            }
-                        }
-                    }
-
-                    $events[] = new EventNode($eventName, $params);
-                }
-            }
+            $events[] = new EventNode($name, $this->parseSignatureParams($params));
         }
 
         return $events;
     }
 
-    // ─────────────────────────────────────────────────────────
-    // Type helpers
-    // ─────────────────────────────────────────────────────────
-
-    private function extractPropertyType(Property $property): string
+    /** @return ErrorNode[] */
+    private function extractErrors(Class_|Interface_ $class): array
     {
-        if ($property->type !== null) {
-            return $this->nodeToTypeString($property->type);
+        $errors = [];
+
+        foreach (AttributeReader::all($class, 'SolidityError') as $attribute) {
+            $args   = AttributeReader::arguments($attribute);
+            $name   = is_string($args['name'] ?? null) ? $args['name'] : 'UnnamedError';
+            $params = is_array($args['params'] ?? null) ? $args['params'] : [];
+
+            $errors[] = new ErrorNode($name, $this->parseSignatureParams($params));
         }
 
-        // Try to infer from the docblock (future enhancement)
-        return 'uint256';
+        return $errors;
     }
 
-    private function nodeToTypeString(Node $type): string
+    /**
+     * Parse ['address indexed from', 'uint256 value'] into EventParamNode objects.
+     *
+     * @param array<mixed> $params
+     * @return EventParamNode[]
+     */
+    private function parseSignatureParams(array $params): array
     {
-        if ($type instanceof Node\Name)               return $type->toString();
-        if ($type instanceof Node\Identifier)         return $type->toString();
-        if ($type instanceof Node\Name\FullyQualified) return $type->getLast();
-        if ($type instanceof Node\NullableType)       return $this->nodeToTypeString($type->type);
+        $nodes = [];
 
-        return 'uint256'; // safe default
+        foreach ($params as $param) {
+            if (! is_string($param) || trim($param) === '') {
+                continue;
+            }
+
+            $parts   = preg_split('/\s+/', trim($param)) ?: [];
+            $name    = array_pop($parts);
+            $indexed = in_array('indexed', $parts, true);
+            $type    = implode(' ', array_filter($parts, static fn ($p) => $p !== 'indexed'));
+
+            $nodes[] = new EventParamNode($type, (string) $name, $indexed);
+        }
+
+        return $nodes;
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Type resolution
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Work out the Solidity type of a property, parameter or struct member.
+     *
+     * Order of precedence: #[SolType] > #[Mapping] > `@sol-type` docblock > the PHP type.
+     */
+    private function resolveType(Node $holder, ?Node $phpType, ?string $docblock, string $what, int $line): string
+    {
+        $override = AttributeReader::argument($holder, 'SolType', 'type');
+        if (is_string($override) && $override !== '') {
+            return $override;
+        }
+
+        $mapping = AttributeReader::find($holder, 'Mapping');
+        if ($mapping !== null) {
+            $args = AttributeReader::arguments($mapping);
+            if (is_string($args['key'] ?? null) && is_string($args['value'] ?? null)) {
+                return "mapping({$args['key']} => {$args['value']})";
+            }
+        }
+
+        if ($docblock !== null && preg_match('/@sol-type\s+([^\r\n*]+)/', $docblock, $m)) {
+            return trim($m[1]);
+        }
+
+        if ($phpType === null) {
+            throw new CompileException(
+                "The {$what} has no type. Every value in a contract needs an explicit type (uint256, address, bool ...).",
+                $line,
+            );
+        }
+
+        $solidityType = $this->types->toSolidity($this->typeName($phpType, $what, $line));
+
+        if ($solidityType === 'mapping') {
+            throw new CompileException(
+                "The {$what} is a mapping without key and value types. " .
+                "Add #[Mapping('address', 'uint256')] above it.",
+                $line,
+            );
+        }
+
+        return $solidityType;
+    }
+
+    private function typeName(Node $type, string $what, int $line): string
+    {
+        if ($type instanceof Node\Name) {
+            return $type->getLast();
+        }
+
+        if ($type instanceof Node\Identifier) {
+            return $type->toString();
+        }
+
+        throw new CompileException(
+            "The {$what} uses a nullable, union or intersection type. Solidity has no such types; use one plain type.",
+            $line,
+        );
     }
 }

@@ -1,0 +1,8 @@
+{
+  "name": "php-solidity-solc-check",
+  "private": true,
+  "description": "Dev-only helper: compiles generated Solidity with solc-js",
+  "dependencies": {
+    "solc": "0.8.26"
+  }
+}
