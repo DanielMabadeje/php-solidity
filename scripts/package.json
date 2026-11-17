@@ -3,6 +3,6 @@
   "private": true,
   "description": "Dev-only helper: compiles generated Solidity with solc-js",
   "dependencies": {
-    "solc": "0.8.26"
+    "solc": "0.8.38"
   }
 }
