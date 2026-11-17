@@ -190,15 +190,26 @@ final class SecurityRule extends AbstractRule
         return false;
     }
 
+        /** Is this assignment target `$this->x`, `$this->x[...]` or a member reached through one of those? */
     private function rootIsStateProperty(Expr $target): bool
     {
-        while ($target instanceof Expr\ArrayDimFetch || $target instanceof Expr\PropertyFetch && ! ($target->var instanceof Expr\Variable && $target->var->name === 'this')) {
-            $target = $target->var;
-        }
+        while (true) {
+            if ($target instanceof Expr\ArrayDimFetch) {
+                $target = $target->var;
+                continue;
+            }
 
-        return $target instanceof Expr\PropertyFetch
-            && $target->var instanceof Expr\Variable
-            && $target->var->name === 'this';
+            if ($target instanceof Expr\PropertyFetch) {
+                if ($target->var instanceof Expr\Variable && $target->var->name === 'this') {
+                    return true;
+                }
+
+                $target = $target->var;
+                continue;
+            }
+
+            return false;
+        }
     }
 
     private function isExternalCall(Node $node): bool

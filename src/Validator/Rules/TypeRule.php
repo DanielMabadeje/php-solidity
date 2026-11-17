@@ -114,7 +114,7 @@ final class TypeRule extends AbstractRule
             return;
         }
 
-        if (isset(TypeMapper::BLOCKED[$key]) && ! $overridden && $key !== 'void') {
+        if (isset(TypeMapper::BLOCKED[$key]) && ! $overridden) {
             $context->error(
                 'E101',
                 "Blocked type '{$name}' in {$what}: " . TypeMapper::BLOCKED[$key],

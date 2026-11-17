@@ -835,7 +835,7 @@ final class BodyEmitter
     }
 
     /**
-     * @param array<Arg|Node\VariadicPlaceholder> $args
+     * @param array<Node> $args
      * @return string[]
      */
     private function args(array $args): array
