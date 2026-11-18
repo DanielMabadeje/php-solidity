@@ -4,12 +4,13 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
-## [0.1.0]
+## [0.2.0]
 
-First tagged release. This is effectively a rewrite of the translation core, so it also lists what changed from the code on `main` before the tag.
+The translation core was rewritten. Version 0.1.0 was published before this rewrite, so this release lists everything that changed since then.
 
 ### Fixed
 
+- `phpsolidity version` reported 0.1.0 in release 0.2.0, because the version constant was not bumped before tagging.
 - **The bundled example produced invalid Solidity.** `MyToken` emitted a bare `mapping`, undeclared local variables, `new uint8(18)`, and parameters that silently hid state variables (`name = name;`). All of these are fixed and the example now compiles with `solc`.
 - **Parameters and locals that share a name with a state variable** no longer collapse into one identifier. They are renamed `name_`, and the validator reports W701.
 - **Operator grouping.** PHP and Solidity rank `&`, `|`, `^` differently from comparisons; nested operations are now always parenthesised.
@@ -45,12 +46,14 @@ First tagged release. This is effectively a rewrite of the translation core, so 
 - Property defaults now work (`#[Constant] private uint8 $decimals = 18;`). `Storage(name: ...)` is accepted but ignored.
 - Requires `nikic/php-parser` ^5, PHPUnit ^10.5 or ^11, PHP 8.1 or newer.
 
-### Upgrading from the pre-0.1.0 code
+### Upgrading from 0.1.0 code
 
 1. Add `#[Mapping(...)]` to every `mapping` property, and give `#[Constant]` properties a value.
 2. Replace `new uint8(18)` property defaults with `18`.
 3. Run `phpsolidity validate` and fix what it reports; expect new warnings (W401, W602, W603, W701).
 4. Remove any `require` of `stubs/evm.php` that relied on Composer autoloading it, and point your IDE at the file instead.
 
-[Unreleased]: https://github.com/DanielMabadeje/php-solidity/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/DanielMabadeje/php-solidity/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/DanielMabadeje/php-solidity/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/DanielMabadeje/php-solidity/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/DanielMabadeje/php-solidity/releases/tag/v0.1.0

@@ -19,7 +19,7 @@ use PhpSolidity\Validator\ContractValidator;
  */
 final class Application
 {
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.2.1';
 
     /** Options that take a value. */
     private const VALUE_OPTIONS = ['output' => 'output', 'o' => 'output', 'config' => 'config', 'solc' => 'solc', 'watch-cycles' => 'watch-cycles'];
